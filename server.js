@@ -7,7 +7,6 @@ const PORT = process.env.PORT || 3000;
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// In-memory storage for Render free tier (no native deps)
 const store = {
   users: {
     'user_001': {
@@ -76,11 +75,10 @@ app.get('/api/tasks', (req, res) => {
 app.post('/api/tasks', (req, res) => {
   const id = generateId();
   const { title, description, difficulty = 'easy', gold_reward = 5, due_date, source = 'sparki', feishu_guid } = req.body;
-  const task = {
+  store.tasks[id] = {
     id, user_id: 'user_001', title, description, difficulty, gold_reward, due_date, source, feishu_guid,
     status: 'todo', created_at: new Date().toISOString(), updated_at: new Date().toISOString()
   };
-  store.tasks[id] = task;
   res.json({ id, success: true });
 });
 

@@ -1,7 +1,7 @@
 {
   "name": "sparki-backend",
   "version": "1.0.0",
-  "description": "Sparki backend with Feishu sync",
+  "description": "Sparki backend with Feishu sync - in-memory storage for Render",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
