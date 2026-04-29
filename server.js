@@ -249,6 +249,34 @@ app.post('/api/rewards/:id/purchase', (req, res) => {
   res.json({ success: true });
 });
 
+// Tasklists
+app.get('/api/tasklists', (req, res) => {
+  const tasklists = Object.values(store.tasklists || {});
+  res.json({ tasklists });
+});
+
+app.post('/api/tasklists', (req, res) => {
+  const id = generateId();
+  const { guid, name } = req.body;
+  if (!store.tasklists) store.tasklists = {};
+  store.tasklists[id] = { id, guid, name, created_at: new Date().toISOString() };
+  res.json({ id, success: true });
+});
+
+// Sections
+app.get('/api/sections', (req, res) => {
+  const sections = Object.values(store.sections || {});
+  res.json({ sections });
+});
+
+app.post('/api/sections', (req, res) => {
+  const id = generateId();
+  const { name, tasklist_id } = req.body;
+  if (!store.sections) store.sections = {};
+  store.sections[id] = { id, name, tasklist_id, created_at: new Date().toISOString() };
+  res.json({ id, success: true });
+});
+
 // Feishu Sync
 app.post('/api/sync/feishu/tasks', (req, res) => {
   const { tasks: feishuTasks } = req.body;
