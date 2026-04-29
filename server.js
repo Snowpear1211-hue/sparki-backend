@@ -1,383 +1,324 @@
-const express = require('express');
-const cors = require('cors');
+{\rtf1\ansi\ansicpg936\cocoartf2868
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
 
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-app.use(cors({ origin: '*' }));
-app.use(express.json());
-
-const store = {
-  users: {
-    'user_001': {
-      id: 'user_001',
-      open_id: 'ou_c5419939397cea2e5a8037e55b1d830e',
-      name: 'Sparki User',
-      gold: 2847,
-      streak_days: 7,
-      last_checkin_date: '2026-04-28',
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    }
-  },
-  tasks: {},
-  transactions: {},
-  gold_history: {},
-  achievements: {},
-  rewards: {}
-};
-
-function generateId() {
-  return 'sparki_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-}
-
-function getUser() {
-  return store.users['user_001'];
-}
-
-function saveUser(user) {
-  store.users['user_001'] = user;
-}
-
-// Health
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', version: '1.0.0', time: new Date().toISOString() });
-});
-
-// User
-app.get('/api/user', (req, res) => {
-  const user = getUser();
-  if (!user) return res.status(404).json({ error: 'User not found' });
-  res.json(user);
-});
-
-app.put('/api/user', (req, res) => {
-  const { gold, streak_days, last_checkin_date } = req.body;
-  const user = getUser();
-  if (gold !== undefined) user.gold = gold;
-  if (streak_days !== undefined) user.streak_days = streak_days;
-  if (last_checkin_date !== undefined) user.last_checkin_date = last_checkin_date;
-  user.updated_at = new Date().toISOString();
-  saveUser(user);
-  res.json({ success: true });
-});
-
-// Tasks
-app.get('/api/tasks', (req, res) => {
-  const { status, source } = req.query;
-  let tasks = Object.values(store.tasks).filter(t => t.user_id === 'user_001');
-  if (status && status !== 'all') tasks = tasks.filter(t => t.status === status);
-  if (source && source !== 'all') tasks = tasks.filter(t => t.source === source);
-  tasks.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-  res.json({ tasks });
-});
-
-app.post('/api/tasks', (req, res) => {
-  const id = generateId();
-  const { title, description, difficulty = 'easy', gold_reward = 5, due_date, source = 'sparki', feishu_guid } = req.body;
-  store.tasks[id] = {
-    id, user_id: 'user_001', title, description, difficulty, gold_reward, due_date, source, feishu_guid,
-    status: 'todo', created_at: new Date().toISOString(), updated_at: new Date().toISOString()
-  };
-  res.json({ id, success: true });
-});
-
-app.get('/api/tasks/:id', (req, res) => {
-  const task = store.tasks[req.params.id];
-  if (!task) return res.status(404).json({ error: 'Task not found' });
-  res.json(task);
-});
-
-app.put('/api/tasks/:id', (req, res) => {
-  const { title, description, status, difficulty, gold_reward, due_date } = req.body;
-  const task = store.tasks[req.params.id];
-  if (!task) return res.status(404).json({ error: 'Task not found' });
-  if (title !== undefined) task.title = title;
-  if (description !== undefined) task.description = description;
-  if (status !== undefined) task.status = status;
-  if (difficulty !== undefined) task.difficulty = difficulty;
-  if (gold_reward !== undefined) task.gold_reward = gold_reward;
-  if (due_date !== undefined) task.due_date = due_date;
-  task.updated_at = new Date().toISOString();
-  res.json({ success: true });
-});
-
-app.post('/api/tasks/:id/complete', (req, res) => {
-  const task = store.tasks[req.params.id];
-  if (!task) return res.status(404).json({ error: 'Task not found' });
-  if (task.status === 'done') return res.status(400).json({ error: 'Task already completed' });
-  
-  const completedAt = new Date().toISOString();
-  const goldReward = task.gold_reward || 5;
-  task.status = 'done';
-  task.completed_at = completedAt;
-  task.updated_at = completedAt;
-  
-  const user = getUser();
-  user.gold += goldReward;
-  user.updated_at = completedAt;
-  saveUser(user);
-  
-  const historyId = generateId();
-  store.gold_history[historyId] = {
-    id: historyId, user_id: 'user_001', amount: goldReward,
-    reason: `完成任务: ${task.title}`, task_id: req.params.id,
-    created_at: completedAt
-  };
-  
-  res.json({ success: true, gold_earned: goldReward });
-});
-
-app.delete('/api/tasks/:id', (req, res) => {
-  delete store.tasks[req.params.id];
-  res.json({ success: true });
-});
-
-// Transactions
-app.get('/api/transactions', (req, res) => {
-  const { type, limit = 50 } = req.query;
-  let transactions = Object.values(store.transactions).filter(t => t.user_id === 'user_001');
-  if (type && type !== 'all') transactions = transactions.filter(t => t.type === type);
-  transactions.sort((a, b) => new Date(b.date) - new Date(a.date));
-  transactions = transactions.slice(0, parseInt(limit));
-  const expenses = transactions.filter(t => t.type === 'expense').reduce((sum, t) => sum + t.amount, 0);
-  const income = transactions.filter(t => t.type === 'income').reduce((sum, t) => sum + t.amount, 0);
-  res.json({ transactions, total_expense: expenses, total_income: income });
-});
-
-app.post('/api/transactions', (req, res) => {
-  const id = generateId();
-  const { title, amount, type, category, category_name, note, date } = req.body;
-  store.transactions[id] = {
-    id, user_id: 'user_001', title, amount, type, category,
-    category_name: category_name || category, note, date,
-    created_at: new Date().toISOString()
-  };
-  res.json({ id, success: true });
-});
-
-// Gold
-app.get('/api/gold/history', (req, res) => {
-  const history = Object.values(store.gold_history)
-    .filter(h => h.user_id === 'user_001')
-    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
-    .slice(0, 50);
-  const user = getUser();
-  res.json({ history, current_gold: user?.gold || 0 });
-});
-
-app.post('/api/gold/checkin', (req, res) => {
-  const user = getUser();
-  const today = new Date().toISOString().split('T')[0];
-  if (user?.last_checkin_date === today) {
-    return res.status(400).json({ error: 'Already checked in today' });
-  }
-  const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
-  const newStreak = user?.last_checkin_date === yesterday ? (user?.streak_days || 0) + 1 : 1;
-  const streakBonus = Math.min(newStreak * 2, 50);
-  const goldEarned = 10 + streakBonus;
-  
-  user.gold += goldEarned;
-  user.streak_days = newStreak;
-  user.last_checkin_date = today;
-  user.updated_at = new Date().toISOString();
-  saveUser(user);
-  
-  const historyId = generateId();
-  store.gold_history[historyId] = {
-    id: historyId, user_id: 'user_001', amount: goldEarned,
-    reason: `每日打卡 (连续${newStreak}天)`, created_at: new Date().toISOString()
-  };
-  
-  res.json({ success: true, gold_earned: goldEarned, streak: newStreak });
-});
-
-// Achievements
-app.get('/api/achievements', (req, res) => {
-  const achievements = Object.values(store.achievements)
-    .filter(a => a.user_id === 'user_001')
-    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-  res.json({ achievements });
-});
-
-app.post('/api/achievements', (req, res) => {
-  const id = generateId();
-  const { icon, name, description } = req.body;
-  store.achievements[id] = {
-    id, user_id: 'user_001', icon, name, description,
-    created_at: new Date().toISOString()
-  };
-  res.json({ id, success: true });
-});
-
-// Rewards
-app.get('/api/rewards', (req, res) => {
-  const rewards = Object.values(store.rewards)
-    .filter(r => r.user_id === 'user_001')
-    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-  res.json({ rewards });
-});
-
-app.post('/api/rewards', (req, res) => {
-  const id = generateId();
-  const { name, description, cost, category, icon } = req.body;
-  store.rewards[id] = {
-    id, user_id: 'user_001', name, description, cost,
-    category: category || 'general', icon, purchased: 0,
-    created_at: new Date().toISOString()
-  };
-  res.json({ id, success: true });
-});
-
-app.post('/api/rewards/:id/purchase', (req, res) => {
-  const reward = store.rewards[req.params.id];
-  if (!reward) return res.status(404).json({ error: 'Reward not found' });
-  const user = getUser();
-  if (user.gold < reward.cost) return res.status(400).json({ error: 'Not enough gold' });
-  
-  user.gold -= reward.cost;
-  user.updated_at = new Date().toISOString();
-  saveUser(user);
-  reward.purchased += 1;
-  
-  const historyId = generateId();
-  store.gold_history[historyId] = {
-    id: historyId, user_id: 'user_001', amount: -reward.cost,
-    reason: `兑换奖励: ${reward.name}`, created_at: new Date().toISOString()
-  };
-  
-  res.json({ success: true });
-});
-
-// Tasklists
-app.get('/api/tasklists', (req, res) => {
-  const tasklists = Object.values(store.tasklists || {});
-  res.json({ tasklists });
-});
-
-app.post('/api/tasklists', (req, res) => {
-  const id = generateId();
-  const { guid, name } = req.body;
-  if (!store.tasklists) store.tasklists = {};
-  store.tasklists[id] = { id, guid, name, created_at: new Date().toISOString() };
-  res.json({ id, success: true });
-});
-
-// Sections
-app.get('/api/sections', (req, res) => {
-  const sections = Object.values(store.sections || {});
-  res.json({ sections });
-});
-
-app.post('/api/sections', (req, res) => {
-  const id = generateId();
-  const { name, tasklist_id } = req.body;
-  if (!store.sections) store.sections = {};
-  store.sections[id] = { id, name, tasklist_id, created_at: new Date().toISOString() };
-  res.json({ id, success: true });
-});
-
-// Feishu Sync
-app.post('/api/sync/feishu/tasks', (req, res) => {
-  const { tasks: feishuTasks } = req.body;
-  if (!Array.isArray(feishuTasks)) return res.status(400).json({ error: 'Invalid tasks array' });
-  
-  const synced = [];
-  for (const ft of feishuTasks) {
-    const existing = Object.values(store.tasks).find(t => t.feishu_guid === ft.guid);
-    const status = ft.completed_at !== '0' && ft.completed_at ? 'done' : 'todo';
-    const completedAt = ft.completed_at !== '0' && ft.completed_at ? new Date(parseInt(ft.completed_at)).toISOString() : null;
-    
-    if (existing) {
-      if (existing.status !== status || existing.title !== ft.summary) {
-        existing.title = ft.summary;
-        existing.status = status;
-        existing.completed_at = completedAt;
-        existing.updated_at = new Date().toISOString();
-        
-        if (status === 'done' && existing.status !== 'done') {
-          const goldReward = existing.gold_reward || 5;
-          const user = getUser();
-          user.gold += goldReward;
-          user.updated_at = new Date().toISOString();
-          saveUser(user);
-          const historyId = generateId();
-          store.gold_history[historyId] = {
-            id: historyId, user_id: 'user_001', amount: goldReward,
-            reason: `完成飞书任务: ${ft.summary}`, task_id: existing.id,
-            created_at: new Date().toISOString()
-          };
-        }
-        synced.push({ id: existing.id, action: 'updated' });
-      }
-    } else {
-      const id = generateId();
-      store.tasks[id] = {
-        id, user_id: 'user_001', title: ft.summary, status, source: 'feishu',
-        feishu_guid: ft.guid, feishu_tasklist_guid: ft.tasklists?.[0]?.tasklist_guid || '',
-        gold_reward: 5, completed_at: completedAt,
-        created_at: new Date().toISOString(), updated_at: new Date().toISOString()
-      };
-      if (status === 'done') {
-        const user = getUser();
-        user.gold += 5;
-        user.updated_at = new Date().toISOString();
-        saveUser(user);
-        const historyId = generateId();
-        store.gold_history[historyId] = {
-          id: historyId, user_id: 'user_001', amount: 5,
-          reason: `完成飞书任务: ${ft.summary}`, task_id: id,
-          created_at: new Date().toISOString()
-        };
-      }
-      synced.push({ id, action: 'created' });
-    }
-  }
-  res.json({ success: true, synced_count: synced.length, tasks: synced });
-});
-
-app.post('/api/sync/feishu/complete', (req, res) => {
-  const { feishu_guid, title } = req.body;
-  const existing = Object.values(store.tasks).find(t => t.feishu_guid === feishu_guid);
-  if (existing) {
-    if (existing.status !== 'done') {
-      existing.status = 'done';
-      existing.completed_at = new Date().toISOString();
-      existing.updated_at = new Date().toISOString();
-      const goldReward = existing.gold_reward || 5;
-      const user = getUser();
-      user.gold += goldReward;
-      user.updated_at = new Date().toISOString();
-      saveUser(user);
-      const historyId = generateId();
-      store.gold_history[historyId] = {
-        id: historyId, user_id: 'user_001', amount: goldReward,
-        reason: `完成飞书任务: ${existing.title || title}`, task_id: existing.id,
-        created_at: new Date().toISOString()
-      };
-    }
-  } else {
-    const id = generateId();
-    store.tasks[id] = {
-      id, user_id: 'user_001', title: title || '飞书任务', status: 'done', source: 'feishu',
-      feishu_guid, gold_reward: 5, completed_at: new Date().toISOString(),
-      created_at: new Date().toISOString(), updated_at: new Date().toISOString()
-    };
-    const user = getUser();
-    user.gold += 5;
-    user.updated_at = new Date().toISOString();
-    saveUser(user);
-    const historyId = generateId();
-    store.gold_history[historyId] = {
-      id: historyId, user_id: 'user_001', amount: 5,
-      reason: `完成飞书任务: ${title || '飞书任务'}`, task_id: id,
-      created_at: new Date().toISOString()
-    };
-  }
-  res.json({ success: true });
-});
-
-app.listen(PORT, () => {
-  console.log(`Sparki backend running on port ${PORT}`);
-  console.log(`Health check: http://localhost:${PORT}/health`);
-});
+\f0\fs24 \cf0 const express = require('express');\
+const cors = require('cors');\
+\
+const app = express();\
+app.use(cors());\
+app.use(express.json());\
+\
+// \uc0\u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \
+// IN-MEMORY STORE\
+// \uc0\u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \
+const store = \{\
+  tasks: \{\},\
+  expenses: \{\},\
+  shopItems: \{\},\
+  tasklists: \{\},\
+  calendarEvents: \{\},\
+  users: \{\
+    'user_001': \{\
+      id: 'user_001',\
+      name: 'Player',\
+      gold: 500,\
+      today_gold: 0,\
+      streak_days: 0,\
+      max_streak: 0,\
+    \}\
+  \}\
+\};\
+\
+const FEISHU_API_BASE = 'https://open.feishu.cn/open-apis';\
+\
+// \uc0\u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \
+// FEISHU TOKEN & FETCH\
+// \uc0\u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \
+async function getTenantToken() \{\
+  try \{\
+    const res = await fetch(`$\{FEISHU_API_BASE\}/auth/v3/tenant_access_token/internal`, \{\
+      method: 'POST',\
+      headers: \{ 'Content-Type': 'application/json' \},\
+      body: JSON.stringify(\{\
+        app_id: process.env.FEISHU_APP_ID || '',\
+        app_secret: process.env.FEISHU_APP_SECRET || ''\
+      \})\
+    \});\
+    const data = await res.json();\
+    if (data.code === 0) return data.tenant_access_token;\
+    console.error('Feishu token error:', data);\
+    return null;\
+  \} catch (err) \{\
+    console.error('Token fetch error:', err);\
+    return null;\
+  \}\
+\}\
+\
+async function fetchTasklists(token) \{\
+  try \{\
+    const res = await fetch(`$\{FEISHU_API_BASE\}/task/v2/tasklists`, \{\
+      method: 'GET',\
+      headers: \{ 'Authorization': `Bearer $\{token\}`, 'Content-Type': 'application/json' \}\
+    \});\
+    const data = await res.json();\
+    if (data.code === 0 && data.data?.items) \{\
+      return data.data.items.map(item => (\{ guid: item.guid, name: item.name || '\uc0\u26410 \u21629 \u21517 ' \}));\
+    \}\
+    return null;\
+  \} catch (err) \{\
+    console.error('Fetch tasklists error:', err);\
+    return null;\
+  \}\
+\}\
+\
+async function fetchTasks(token, tasklistGuid) \{\
+  try \{\
+    const res = await fetch(`$\{FEISHU_API_BASE\}/task/v2/tasklists/$\{tasklistGuid\}/tasks?page_size=500`, \{\
+      method: 'GET',\
+      headers: \{ 'Authorization': `Bearer $\{token\}`, 'Content-Type': 'application/json' \}\
+    \});\
+    const data = await res.json();\
+    if (data.code === 0 && data.data?.items) \{\
+      return data.data.items.map(item => (\{\
+        id: item.task?.guid || item.guid || `sparki_$\{Date.now()\}_$\{Math.random()\}`,\
+        title: item.task?.summary || '\uc0\u26410 \u21629 \u21517 \u20219 \u21153 ',\
+        description: item.task?.description || '',\
+        status: item.task?.completed ? 'done' : 'todo',\
+        due_date: item.task?.due?.timestamp\
+          ? new Date(parseInt(item.task.due.timestamp)).toISOString().split('T')[0]\
+          : null,\
+        completed_at: item.task?.completed ? new Date().toISOString() : null,\
+        source: 'feishu',\
+        feishu_guid: item.task?.guid || item.guid,\
+        feishu_tasklist_guid: tasklistGuid,\
+        user_id: 'user_001',\
+        created_at: new Date().toISOString(),\
+        updated_at: new Date().toISOString()\
+      \}));\
+    \}\
+    return null;\
+  \} catch (err) \{\
+    console.error('Fetch tasks error:', err);\
+    return null;\
+  \}\
+\}\
+\
+// \uc0\u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \
+// FEISHU PUSH (webhook)\
+// \uc0\u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \
+function pushTasklist(list) \{\
+  const id = list.id || list.guid || `list_$\{Date.now()\}`;\
+  store.tasklists[id] = \{\
+    id, name: list.name || '\uc0\u26410 \u21629 \u21517 \u28165 \u21333 ',\
+    feishu_guid: list.guid || list.id,\
+    user_id: 'user_001',\
+    created_at: new Date().toISOString(),\
+    updated_at: new Date().toISOString(),\
+    ...list,\
+  \};\
+  return store.tasklists[id];\
+\}\
+\
+function pushTask(task) \{\
+  const id = task.id || task.guid || `task_$\{Date.now()\}_$\{Math.random()\}`;\
+  store.tasks[id] = \{\
+    id, title: task.title || task.summary || '\uc0\u26410 \u21629 \u21517 \u20219 \u21153 ',\
+    description: task.description || '',\
+    status: task.status || 'todo',\
+    source: 'feishu',\
+    feishu_guid: task.guid || task.id,\
+    feishu_tasklist_guid: task.tasklist_id || task.list_id || null,\
+    user_id: 'user_001',\
+    due_date: task.due_date || null,\
+    completed_at: task.completed_at || null,\
+    gold_reward: task.gold_reward || 5,\
+    created_at: task.created_at || new Date().toISOString(),\
+    updated_at: new Date().toISOString(),\
+    ...task,\
+  \};\
+  return store.tasks[id];\
+\}\
+\
+function updateTask(id, updates) \{\
+  if (!store.tasks[id]) return null;\
+  store.tasks[id] = \{ ...store.tasks[id], ...updates, updated_at: new Date().toISOString() \};\
+  return store.tasks[id];\
+\}\
+\
+function deleteTask(id) \{\
+  const t = store.tasks[id];\
+  if (t) \{ delete store.tasks[id]; return t; \}\
+  return null;\
+\}\
+\
+// \uc0\u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \
+// ROUTES\
+// \uc0\u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \
+\
+app.get('/', (req, res) => \{\
+  res.json(\{\
+    ok: true, service: 'sparki-backend',\
+    stats: \{\
+      tasks: Object.keys(store.tasks).length,\
+      tasklists: Object.keys(store.tasklists).length,\
+      expenses: Object.keys(store.expenses).length,\
+      shopItems: Object.keys(store.shopItems).length,\
+    \}\
+  \});\
+\});\
+\
+// \uc0\u9472 \u9472  Feishu Webhook \u9472 \u9472 \
+app.post('/api/webhook', (req, res) => \{\
+  const event = req.body;\
+  const eventType = event.header?.event_type || event.event?.type;\
+  if (eventType?.includes('tasklist')) \{\
+    const list = event.event?.tasklist || event.event;\
+    if (list) pushTasklist(list);\
+  \} else if (eventType?.includes('task')) \{\
+    const task = event.event?.task || event.event;\
+    if (task) pushTask(task);\
+  \}\
+  res.json(\{ code: 0 \});\
+\});\
+\
+// \uc0\u9472 \u9472  Feishu Manual Sync \u9472 \u9472 \
+app.post('/api/feishu/sync', async (req, res) => \{\
+  try \{\
+    const token = await getTenantToken();\
+    if (!token) return res.status(500).json(\{ error: 'Failed to get Feishu token. Check FEISHU_APP_ID and FEISHU_APP_SECRET.' \});\
+\
+    const lists = await fetchTasklists(token);\
+    if (!lists) return res.status(500).json(\{ error: 'Failed to fetch tasklists from Feishu' \});\
+\
+    let totalTasks = 0;\
+    const imported = [];\
+\
+    // Clear old data\
+    store.tasks = \{\};\
+    store.tasklists = \{\};\
+\
+    for (const list of lists) \{\
+      store.tasklists[list.guid] = \{\
+        id: list.guid, name: list.name,\
+        feishu_guid: list.guid, user_id: 'user_001',\
+        created_at: new Date().toISOString(),\
+        updated_at: new Date().toISOString(),\
+      \};\
+\
+      const tasks = await fetchTasks(token, list.guid);\
+      if (!tasks) continue;\
+\
+      for (const t of tasks) \{\
+        store.tasks[t.id] = t;\
+        totalTasks++;\
+      \}\
+      imported.push(\{ list: list.name, count: tasks.length \});\
+    \}\
+\
+    res.json(\{ ok: true, tasklists: lists.length, tasks: totalTasks, detail: imported \});\
+  \} catch (err) \{\
+    console.error('/api/feishu/sync error:', err);\
+    res.status(500).json(\{ error: err.message \});\
+  \}\
+\});\
+\
+// \uc0\u9472 \u9472  Tasks \u9472 \u9472 \
+app.get('/api/tasks', (req, res) => \{\
+  const tasks = Object.values(store.tasks).sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));\
+  res.json(\{ tasks \});\
+\});\
+\
+app.get('/api/tasklists', (req, res) => \{\
+  res.json(\{ tasklists: Object.values(store.tasklists) \});\
+\});\
+\
+app.post('/api/tasks', (req, res) => \{\
+  const task = pushTask(req.body);\
+  res.status(201).json(task);\
+\});\
+\
+app.patch('/api/tasks/:id', (req, res) => \{\
+  const task = updateTask(req.params.id, req.body);\
+  if (!task) return res.status(404).json(\{ error: 'Task not found' \});\
+  res.json(task);\
+\});\
+\
+app.delete('/api/tasks/:id', (req, res) => \{\
+  const task = deleteTask(req.params.id);\
+  if (!task) return res.status(404).json(\{ error: 'Task not found' \});\
+  res.json(\{ ok: true \});\
+\});\
+\
+// \uc0\u9472 \u9472  Expenses \u9472 \u9472 \
+app.get('/api/expenses', (req, res) => \{\
+  const items = Object.values(store.expenses).sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));\
+  res.json(items);\
+\});\
+\
+app.post('/api/expenses', (req, res) => \{\
+  const id = `exp_$\{Date.now()\}`;\
+  store.expenses[id] = \{ id, ...req.body, created_at: new Date().toISOString() \};\
+  res.status(201).json(store.expenses[id]);\
+\});\
+\
+// \uc0\u9472 \u9472  Shop \u9472 \u9472 \
+app.get('/api/shopitems', (req, res) => \{\
+  res.json(Object.values(store.shopItems));\
+\});\
+\
+app.post('/api/shopitems', (req, res) => \{\
+  const id = `shop_$\{Date.now()\}`;\
+  store.shopItems[id] = \{ id, ...req.body, created_at: new Date().toISOString() \};\
+  res.status(201).json(store.shopItems[id]);\
+\});\
+\
+app.post('/api/shopitems/:id/purchase', (req, res) => \{\
+  const item = store.shopItems[req.params.id];\
+  if (!item) return res.status(404).json(\{ error: 'Item not found' \});\
+  item.purchased = true;\
+  item.purchased_at = new Date().toISOString();\
+  res.json(item);\
+\});\
+\
+// \uc0\u9472 \u9472  Calendar \u9472 \u9472 \
+app.get('/api/calendar', (req, res) => \{\
+  const events = Object.values(store.calendarEvents).sort((a, b) => new Date(b.startTime || 0) - new Date(a.startTime || 0));\
+  res.json(\{ events \});\
+\});\
+\
+app.post('/api/calendar', (req, res) => \{\
+  const id = `cal_$\{Date.now()\}`;\
+  store.calendarEvents[id] = \{ id, ...req.body, created_at: new Date().toISOString() \};\
+  res.status(201).json(store.calendarEvents[id]);\
+\});\
+\
+// \uc0\u9472 \u9472  User \u9472 \u9472 \
+app.get('/api/user', (req, res) => \{\
+  const user = store.users['user_001'];\
+  if (!user) return res.status(404).json(\{ error: 'User not found' \});\
+  res.json(user);\
+\});\
+\
+app.post('/api/user/gold', (req, res) => \{\
+  const \{ gold, today_gold \} = req.body;\
+  const user = store.users['user_001'];\
+  if (user) \{\
+    if (gold !== undefined) user.gold = gold;\
+    if (today_gold !== undefined) user.today_gold = today_gold;\
+    user.updated_at = new Date().toISOString();\
+  \}\
+  res.json(user);\
+\});\
+\
+// \uc0\u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \
+// START\
+// \uc0\u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \u9552 \
+const PORT = process.env.PORT || 10000;\
+app.listen(PORT, () => \{\
+  console.log(`Sparki backend running on port $\{PORT\}`);\
+  console.log(`Tasks: $\{Object.keys(store.tasks).length\}, Tasklists: $\{Object.keys(store.tasklists).length\}`);\
+\});}
