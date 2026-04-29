@@ -110,4 +110,16 @@ app.get('/api/tasks', (req, res) => { const tasks = Object.values(store.tasks).s
 app.get('/api/tasklists', (req, res) => { res.json({ tasklists: Object.values(store.tasklists) }); });
 app.post('/api/tasks', (req, res) => { const task = pushTask(req.body); res.status(201).json(task); });
 app.patch('/api/tasks/:id', (req, res) => { const task = updateTask(req.params.id, req.body); if (!task) return res.status(404).json({ error: 'Task not found' }); res.json(task); });
-app.delete('/api/tasks/:id', (req, res) =>
+app.delete('/api/tasks/:id', (req, res) => { const task = deleteTask(req.params.id); if (!task) return res.status(404).json({ error: 'Task not found' }); res.json({ ok: true }); });
+app.get('/api/expenses', (req, res) => { const items = Object.values(store.expenses).sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0)); res.json(items); });
+app.post('/api/expenses', (req, res) => { const id = `exp_${Date.now()}`; store.expenses[id] = { id, ...req.body, created_at: new Date().toISOString() }; res.status(201).json(store.expenses[id]); });
+app.get('/api/shopitems', (req, res) => { res.json(Object.values(store.shopItems)); });
+app.post('/api/shopitems', (req, res) => { const id = `shop_${Date.now()}`; store.shopItems[id] = { id, ...req.body, created_at: new Date().toISOString() }; res.status(201).json(store.shopItems[id]); });
+app.post('/api/shopitems/:id/purchase', (req, res) => { const item = store.shopItems[req.params.id]; if (!item) return res.status(404).json({ error: 'Item not found' }); item.purchased = true; item.purchased_at = new Date().toISOString(); res.json(item); });
+app.get('/api/calendar', (req, res) => { const events = Object.values(store.calendarEvents).sort((a, b) => new Date(b.startTime || 0) - new Date(a.startTime || 0)); res.json({ events }); });
+app.post('/api/calendar', (req, res) => { const id = `cal_${Date.now()}`; store.calendarEvents[id] = { id, ...req.body, created_at: new Date().toISOString() }; res.status(201).json(store.calendarEvents[id]); });
+app.get('/api/user', (req, res) => { const user = store.users['user_001']; if (!user) return res.status(404).json({ error: 'User not found' }); res.json(user); });
+app.post('/api/user/gold', (req, res) => { const { gold, today_gold } = req.body; const user = store.users['user_001']; if (user) { if (gold !== undefined) user.gold = gold; if (today_gold !== undefined) user.today_gold = today_gold; user.updated_at = new Date().toISOString(); } res.json(user); });
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => { console.log(`Sparki backend running on port ${PORT}`); console.log(`Tasks: ${Object.keys(store.tasks).length}, Tasklists: ${Object.keys(store.tasklists).length}`); });
