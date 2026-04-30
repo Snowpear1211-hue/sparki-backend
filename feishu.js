@@ -184,7 +184,13 @@ async function fetchFeishuTasks(db, tasklistGuid) {
   }
 }
 
+// ======== USER TOKEN VERSIONS (with error details) ========
+
+let lastTasklistsError = null;
+let lastTasksError = null;
+
 async function fetchTasklistsWithUserToken(userToken) {
+  lastTasklistsError = null;
   try {
     const res = await fetch(FEISHU_API_BASE + '/task/v2/tasklists?page_size=500', {
       method: 'GET',
@@ -192,9 +198,12 @@ async function fetchTasklistsWithUserToken(userToken) {
     });
     const data = await res.json();
     console.log('[UserToken] tasklists code:', data.code, 'msg:', data.msg);
+
     if (data.code === 0 && data.data && data.data.items) {
       return data.data.items.map((item) => ({ guid: item.guid, name: item.name || '未命名清单' }));
     }
+
+    lastTasklistsError = { api: 'v2/tasklists', code: data.code, msg: data.msg };
     if (data.code !== 0) {
       console.log('[UserToken] v2 failed, trying v1...');
       const resV1 = await fetch(FEISHU_API_BASE + '/task/v1/tasklist?page_size=500', {
@@ -203,6 +212,7 @@ async function fetchTasklistsWithUserToken(userToken) {
       });
       const dataV1 = await resV1.json();
       console.log('[UserToken] v1 code:', dataV1.code, 'msg:', dataV1.msg);
+      lastTasklistsError = { ...lastTasklistsError, v1_code: dataV1.code, v1_msg: dataV1.msg };
       if (dataV1.code === 0 && dataV1.data && dataV1.data.items) {
         return dataV1.data.items.map((item) => ({ guid: item.guid, name: item.name || '未命名清单' }));
       }
@@ -211,17 +221,20 @@ async function fetchTasklistsWithUserToken(userToken) {
     return null;
   } catch (err) {
     console.error('[UserToken] tasklists error:', err);
+    lastTasklistsError = { exception: err.message };
     return null;
   }
 }
 
 async function fetchTasksWithUserToken(userToken, tasklistGuid) {
+  lastTasksError = null;
   try {
     const res = await fetch(FEISHU_API_BASE + '/task/v2/tasklists/' + tasklistGuid + '/tasks?page_size=500', {
       method: 'GET',
       headers: { Authorization: 'Bearer ' + userToken, 'Content-Type': 'application/json' },
     });
     const data = await res.json();
+
     if (data.code === 0 && data.data && data.data.items) {
       return data.data.items.map((item) => ({
         id: item.task ? (item.task.id || item.guid || 'sparki_' + Date.now()) : (item.guid || 'sparki_' + Date.now()),
@@ -234,6 +247,8 @@ async function fetchTasksWithUserToken(userToken, tasklistGuid) {
         tasklist_guid: tasklistGuid,
       }));
     }
+
+    lastTasksError = { api: 'v2', code: data.code, msg: data.msg };
     if (data.code !== 0) {
       console.log('[UserToken] v2 tasks failed, trying v1...');
       const resV1 = await fetch(FEISHU_API_BASE + '/task/v1/tasklist/' + tasklistGuid + '/tasks?page_size=500', {
@@ -241,6 +256,7 @@ async function fetchTasksWithUserToken(userToken, tasklistGuid) {
         headers: { Authorization: 'Bearer ' + userToken, 'Content-Type': 'application/json' },
       });
       const dataV1 = await resV1.json();
+      lastTasksError = { ...lastTasksError, v1_code: dataV1.code, v1_msg: dataV1.msg };
       if (dataV1.code === 0 && dataV1.data && dataV1.data.items) {
         return dataV1.data.items.map((item) => ({
           id: item.task ? (item.task.id || item.guid || 'sparki_' + Date.now()) : (item.guid || 'sparki_' + Date.now()),
@@ -258,9 +274,13 @@ async function fetchTasksWithUserToken(userToken, tasklistGuid) {
     return null;
   } catch (err) {
     console.error('[UserToken] tasks error:', err);
+    lastTasksError = { exception: err.message };
     return null;
   }
 }
+
+function getLastTasklistsError() { return lastTasklistsError; }
+function getLastTasksError() { return lastTasksError; }
 
 module.exports = {
   getValidToken,
@@ -273,4 +293,6 @@ module.exports = {
   fetchFeishuTasks,
   fetchTasklistsWithUserToken,
   fetchTasksWithUserToken,
+  getLastTasklistsError,
+  getLastTasksError,
 };
