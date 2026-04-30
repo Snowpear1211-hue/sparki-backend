@@ -286,8 +286,4 @@ module.exports = {
   updateFeishuTask,
   fetchFeishuTasklists,
   fetchFeishuTasks,
-  fetchTasklistsWithUserToken,
-  fetchTasksWithUserToken,
-  getLastTasklistsError,
-  getLastTasksError,
 };
