@@ -13,6 +13,8 @@ const {
   fetchFeishuTasks,
   fetchTasklistsWithUserToken,
   fetchTasksWithUserToken,
+  getLastTasklistsError,
+  getLastTasksError,
 } = require('./feishu');
 
 const app = express();
@@ -27,7 +29,7 @@ const FEISHU_REDIRECT_URI = process.env.FEISHU_REDIRECT_URI || 'https://sparki-b
 
 // Health Check
 app.get('/', (req, res) => {
-  res.json({ ok: true, service: 'sparki-backend', version: '2.1.0' });
+  res.json({ ok: true, service: 'sparki-backend', version: '2.1.1' });
 });
 
 // GET /api/user
@@ -63,7 +65,7 @@ app.post('/api/user/update-gold', async (req, res) => {
   }
   try {
     await pool.query('UPDATE users SET gold = gold + $1, updated_at = NOW() WHERE id = $2', [gold_delta, 'user_001']);
-n    const { rows } = await pool.query('SELECT gold FROM users WHERE id = $1', ['user_001']);
+    const { rows } = await pool.query('SELECT gold FROM users WHERE id = $1', ['user_001']);
     res.json({ gold: rows[0].gold });
   } catch (err) {
     console.error('POST /api/user/update-gold error:', err);
@@ -397,7 +399,7 @@ app.post('/api/feishu/sync', async (req, res) => {
     debug.tokenStatus.hasToken = !!userAccessTokenCache.token;
     debug.tokenStatus.expired = Date.now() >= userAccessTokenCache.expireAt;
     debug.tokenStatus.hasValidToken = !!(userAccessTokenCache.token && Date.now() < userAccessTokenCache.expireAt);
-    debug.steps.push('Token status checked: hasValid=' + debug.tokenStatus.hasValidToken);
+    debug.steps.push('Token checked: hasValid=' + debug.tokenStatus.hasValidToken);
 
     let feishuLists = null;
 
@@ -407,16 +409,16 @@ app.post('/api/feishu/sync', async (req, res) => {
         feishuLists = await fetchTasklistsWithUserToken(userAccessTokenCache.token);
         debug.tasklistAttempt = 'user_token';
         if (feishuLists) {
-          debug.steps.push('User token success: ' + feishuLists.length + ' lists');
+          debug.steps.push('User token OK: ' + feishuLists.length + ' lists');
         } else {
-          debug.steps.push('User token returned null (API error)');
+          debug.steps.push('User token returned null');
+          debug.tasklistError = getLastTasklistsError();
         }
       } catch (e) {
         debug.steps.push('User token threw: ' + e.message);
-        debug.tasklistError = e.message;
       }
     } else {
-      debug.steps.push('Skipping user token (missing or expired)');
+      debug.steps.push('Skip user token (missing/expired)');
     }
 
     if (!feishuLists) {
@@ -426,18 +428,18 @@ app.post('/api/feishu/sync', async (req, res) => {
         const db = { pool };
         feishuLists = await fetchFeishuTasklists(db);
         if (feishuLists) {
-          debug.steps.push('Tenant token success: ' + feishuLists.length + ' lists');
+          debug.steps.push('Tenant token OK: ' + feishuLists.length + ' lists');
         } else {
-          debug.steps.push('Tenant token returned null (API error)');
+          debug.steps.push('Tenant token returned null');
         }
       } catch (e) {
         debug.steps.push('Tenant token threw: ' + e.message);
-        debug.tasklistError = (debug.tasklistError ? debug.tasklistError + '; ' : '') + e.message;
       }
     }
 
     if (!feishuLists) {
       debug.steps.push('Both tokens failed');
+      debug.tasklistApiError = getLastTasklistsError();
       return res.status(500).json({
         error: 'Failed to fetch tasklists',
         debug: debug,
@@ -445,7 +447,7 @@ app.post('/api/feishu/sync', async (req, res) => {
     }
 
     debug.tasklistsFetched = feishuLists.map(l => ({ guid: l.guid, name: l.name }));
-    debug.steps.push('Saving ' + feishuLists.length + ' tasklists to DB...');
+    debug.steps.push('Saving ' + feishuLists.length + ' tasklists...');
 
     const savedLists = [];
     for (const list of feishuLists) {
@@ -470,7 +472,7 @@ app.post('/api/feishu/sync', async (req, res) => {
         tasks = await fetchFeishuTasks(db, list.guid);
       }
       if (!tasks) {
-        debug.steps.push('No tasks for list: ' + list.name);
+        debug.steps.push('No tasks for: ' + list.name);
         continue;
       }
       debug.steps.push('List "' + list.name + '": ' + tasks.length + ' tasks');
@@ -493,7 +495,7 @@ app.post('/api/feishu/sync', async (req, res) => {
       }
     }
 
-    debug.steps.push('Done. ' + savedLists.length + ' lists, ' + totalTasks + ' tasks');
+    debug.steps.push('Done: ' + savedLists.length + ' lists, ' + totalTasks + ' tasks');
     res.json({ ok: true, tasklists: savedLists.length, tasks: totalTasks, detail: { lists: savedLists, tasks: savedTasks.slice(0, 20) }, debug: debug });
   } catch (err) {
     console.error('POST /api/feishu/sync error:', err);
