@@ -350,7 +350,7 @@ app.get('/api/feishu/oauth/callback', async (req, res) => {
 
     if (tokenData.code !== 0 || !tokenData.data || !tokenData.data.access_token) {
       console.error('[OAuth] Token exchange failed:', JSON.stringify(tokenData));
-      return res.redirect('https://aqjsoa7d7jhfm.ok.kimi.link/?oauth=error&message=' + encodeURIComponent(tokenData.msg || 'Token exchange failed'));
+      return res.redirect('https://aqjsoa7d7jhfm.ok.kimi.link/#/?oauth=error&message=' + encodeURIComponent(tokenData.msg || 'Token exchange failed'));
     }
 
     const userToken = tokenData.data.access_token;
@@ -366,10 +366,10 @@ app.get('/api/feishu/oauth/callback', async (req, res) => {
       console.log('[OAuth] User:', userData.data.name);
     }
 
-    res.redirect('https://aqjsoa7d7jhfm.ok.kimi.link/?oauth=success');
+    res.redirect('https://aqjsoa7d7jhfm.ok.kimi.link/#/?oauth=success');
   } catch (err) {
     console.error('[OAuth] Callback error:', err);
-    res.redirect('https://aqjsoa7d7jhfm.ok.kimi.link/?oauth=error&message=' + encodeURIComponent(err.message));
+    res.redirect('https://aqjsoa7d7jhfm.ok.kimi.link/#/?oauth=error&message=' + encodeURIComponent(err.message));
   }
 });
 
