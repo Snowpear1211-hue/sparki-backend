@@ -5,18 +5,25 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// ═══════════════════════════════════════════════
+// IN-MEMORY STORE
+// ═══════════════════════════════════════════════
 const store = {
   tasks: {}, expenses: {}, shopItems: {}, tasklists: {}, calendarEvents: {},
   users: { 'user_001': { id: 'user_001', name: 'Player', gold: 500, today_gold: 0, streak_days: 0, max_streak: 0 } }
 };
 
+// OAuth state & token cache
+const oauthState = new Map();
+let userAccessToken = null;
+let userRefreshToken = null;
+
 const FEISHU_API_BASE = 'https://open.feishu.cn/open-apis';
 
 // ═══════════════════════════════════════════════
-// TOKEN HELPERS
+// FEISHU TOKEN HELPERS
 // ═══════════════════════════════════════════════
 
-// Get tenant_access_token (app-level)
 async function getTenantToken() {
   try {
     const res = await fetch(`${FEISHU_API_BASE}/auth/v3/tenant_access_token/internal`, {
@@ -24,37 +31,72 @@ async function getTenantToken() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ app_id: process.env.FEISHU_APP_ID || '', app_secret: process.env.FEISHU_APP_SECRET || '' })
     });
-    const data = await res.json();
+n    const data = await res.json();
     if (data.code === 0) return data.tenant_access_token;
     console.error('Tenant token error:', data); return null;
   } catch (err) { console.error('Tenant token fetch error:', err); return null; }
 }
 
+async function exchangeCodeForToken(code) {
+  const tenantToken = await getTenantToken();
+  if (!tenantToken) return null;
+  try {
+    const res = await fetch(`${FEISHU_API_BASE}/authen/v1/access_token`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${tenantToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ grant_type: 'authorization_code', code })
+    });
+    const data = await res.json();
+    console.log('Exchange code response:', JSON.stringify(data).slice(0, 300));
+    if (data.code === 0 && data.data) {
+      return { access_token: data.data.access_token, refresh_token: data.data.refresh_token, expire: data.data.expires_in || 7200 };
+    }
+    console.error('Exchange code failed:', data); return null;
+  } catch (err) { console.error('Exchange code error:', err); return null; }
+}
+
+async function getUserToken() {
+  if (!userAccessToken) return null;
+  if (Date.now() < userAccessToken.expireAt - 60000) return userAccessToken.token;
+  // refresh
+  if (!userRefreshToken) return null;
+  const tenantToken = await getTenantToken();
+  if (!tenantToken) return null;
+  try {
+    const res = await fetch(`${FEISHU_API_BASE}/authen/v1/refresh_access_token`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${tenantToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ grant_type: 'refresh_token', refresh_token: userRefreshToken })
+    });
+    const data = await res.json();
+    if (data.code === 0 && data.data) {
+      userAccessToken = { token: data.data.access_token, expireAt: Date.now() + (data.data.expires_in || 7200) * 1000 };
+      userRefreshToken = data.data.refresh_token;
+      return userAccessToken.token;
+    }
+    return null;
+  } catch (err) { return null; }
+}
+
 // ═══════════════════════════════════════════════
-// FEISHU FETCH (using tenant token)
+// FEISHU FETCH (user_access_token)
 // ═══════════════════════════════════════════════
 
-async function fetchTasklists(token) {
+async function fetchTasklistsUser(token) {
   try {
     const res = await fetch(`${FEISHU_API_BASE}/task/v2/tasklists`, {
       method: 'GET',
       headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
     });
     const data = await res.json();
-    console.log('Fetch tasklists response:', JSON.stringify(data).slice(0, 200));
-    if (data.code === 0 && data.data?.items) {
-      return data.data.items.map(item => ({ guid: item.guid, name: item.name || '未命名' }));
-    }
-    // If no items field, might be empty or error
-    if (data.code === 0 && (!data.data || !data.data.items)) {
-      console.log('No tasklists found - app may need user authorization');
-      return [];
-    }
-    console.error('Fetch tasklists failed:', data); return null;
-  } catch (err) { console.error('Fetch tasklists error:', err); return null; }
+    console.log('Fetch tasklists (user):', JSON.stringify(data).slice(0, 300));
+    if (data.code === 0 && data.data?.items) return data.data.items.map(item => ({ guid: item.guid, name: item.name || '未命名' }));
+    if (data.code === 0 && (!data.data || !data.data.items)) return [];
+    console.error('Fetch tasklists (user) failed:', data); return null;
+  } catch (err) { console.error('Fetch tasklists user error:', err); return null; }
 }
 
-async function fetchTasks(token, tasklistGuid) {
+async function fetchTasksUser(token, tasklistGuid) {
   try {
     const res = await fetch(`${FEISHU_API_BASE}/task/v2/tasklists/${tasklistGuid}/tasks?page_size=500`, {
       method: 'GET',
@@ -78,12 +120,12 @@ async function fetchTasks(token, tasklistGuid) {
       }));
     }
     if (data.code === 0 && (!data.data || !data.data.items)) return [];
-    console.error(`Fetch tasks for ${tasklistGuid} failed:`, data); return null;
-  } catch (err) { console.error('Fetch tasks error:', err); return null; }
+    console.error(`Fetch tasks user for ${tasklistGuid} failed:`, data); return null;
+  } catch (err) { console.error('Fetch tasks user error:', err); return null; }
 }
 
 // ═══════════════════════════════════════════════
-// IN-MEMORY STORE HELPERS
+// IN-MEMORY HELPERS
 // ═══════════════════════════════════════════════
 
 function pushTasklist(list) {
@@ -109,56 +151,67 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 
 app.get('/', (req, res) => { res.json({ ok: true, service: 'sparki-backend', stats: { tasks: Object.keys(store.tasks).length, tasklists: Object.keys(store.tasklists).length, expenses: Object.keys(store.expenses).length, shopItems: Object.keys(store.shopItems).length } }); });
 
-// ── Feishu Webhook (handle challenge + events) ──
-app.post('/api/webhook', (req, res) => {
-  const body = req.body;
-  console.log('Webhook received:', JSON.stringify(body).slice(0, 200));
-
-  // 1. URL verification - MUST return challenge
-  if (body.challenge) {
-    console.log('Challenge received:', body.challenge);
-    return res.json({ challenge: body.challenge });
-  }
-
-  // 2. Event push
-  const eventType = body.header?.event_type || body.event?.type;
-  if (eventType?.includes('tasklist')) {
-    const list = body.event?.tasklist || body.event;
-    if (list) pushTasklist(list);
-  } else if (eventType?.includes('task')) {
-    const task = body.event?.task || body.event;
-    if (task) pushTask(task);
-  }
-  res.json({ code: 0 });
+// ── Feishu OAuth Step 1: Generate auth URL ──
+app.get('/api/feishu/oauth/url', async (req, res) => {
+  const appId = process.env.FEISHU_APP_ID;
+  if (!appId) return res.status(500).json({ error: 'FEISHU_APP_ID not configured' });
+  const state = `st_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  oauthState.set(state, { createdAt: Date.now() });
+  for (const [k, v] of oauthState.entries()) { if (Date.now() - v.createdAt > 10 * 60 * 1000) oauthState.delete(k); }
+  const redirectUri = encodeURIComponent('https://sparki-backend-osgd.onrender.com/api/feishu/oauth/callback');
+  const scope = encodeURIComponent('task:task:read task:tasklist:read');
+  const url = `https://open.feishu.cn/open-apis/authen/v1/index?app_id=${appId}&redirect_uri=${redirectUri}&scope=${scope}&state=${state}`;
+  res.json({ url, state });
 });
 
-// ── Feishu Manual Sync ──
+// ── Feishu OAuth Step 2: Callback ──
+app.get('/api/feishu/oauth/callback', async (req, res) => {
+  const { code, state } = req.query;
+  console.log('OAuth callback:', { code: code?.slice(0, 10), state });
+  if (!code || !state) return res.status(400).send('<h1>授权失败</h1><p>缺少 code 或 state</p>');
+  if (!oauthState.has(state)) return res.status(400).send('<h1>授权失败</h1><p>state 已过期，请重试</p>');
+  oauthState.delete(state);
+  const tokenInfo = await exchangeCodeForToken(code);
+  if (!tokenInfo) return res.status(500).send('<h1>授权失败</h1><p>无法换取 access_token</p>');
+  userAccessToken = { token: tokenInfo.access_token, expireAt: Date.now() + tokenInfo.expire * 1000 };
+  userRefreshToken = tokenInfo.refresh_token;
+  res.redirect('https://aqjsoa7d7jhfm.ok.kimi.link/quests?oauth=success');
+});
+
+// ── Check OAuth status ──
+app.get('/api/feishu/oauth/status', (req, res) => {
+  const hasToken = !!userAccessToken && Date.now() < userAccessToken.expireAt - 60000;
+  res.json({ authorized: hasToken, expiresIn: userAccessToken ? Math.floor((userAccessToken.expireAt - Date.now()) / 1000) : 0 });
+});
+
+// ── Feishu Sync (uses user_access_token) ──
 app.post('/api/feishu/sync', async (req, res) => {
   try {
-    console.log('Starting Feishu sync...');
-    const token = await getTenantToken();
-    if (!token) return res.status(500).json({ error: 'Failed to get Feishu token. Check FEISHU_APP_ID and FEISHU_APP_SECRET.' });
-    console.log('Got tenant token');
-
-    const lists = await fetchTasklists(token);
+    const token = await getUserToken();
+    if (!token) return res.status(401).json({ error: 'No user authorization. Please authorize Feishu first.', needAuth: true });
+    console.log('Starting Feishu user sync...');
+    const lists = await fetchTasklistsUser(token);
     if (lists === null) return res.status(500).json({ error: 'Failed to fetch tasklists from Feishu' });
-    console.log(`Fetched ${lists.length} tasklists`);
-
-    let totalTasks = 0;
-    const imported = [];
-
-    // Don't clear - merge instead
+    let totalTasks = 0; const imported = [];
     for (const list of lists) {
       store.tasklists[list.guid] = { id: list.guid, name: list.name, feishu_guid: list.guid, user_id: 'user_001', created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
-      const tasks = await fetchTasks(token, list.guid);
-      if (!tasks) continue;
+      const tasks = await fetchTasksUser(token, list.guid); if (!tasks) continue;
       for (const t of tasks) { store.tasks[t.id] = t; totalTasks++; }
       imported.push({ list: list.name, count: tasks.length });
     }
-
     console.log(`Sync complete: ${lists.length} lists, ${totalTasks} tasks`);
     res.json({ ok: true, tasklists: lists.length, tasks: totalTasks, detail: imported });
   } catch (err) { console.error('/api/feishu/sync error:', err); res.status(500).json({ error: err.message }); }
+});
+
+// ── Feishu Webhook ──
+app.post('/api/webhook', (req, res) => {
+  const body = req.body;
+  if (body.challenge) return res.json({ challenge: body.challenge });
+  const eventType = body.header?.event_type || body.event?.type;
+  if (eventType?.includes('tasklist')) { const list = body.event?.tasklist || body.event; if (list) pushTasklist(list); }
+  else if (eventType?.includes('task')) { const task = body.event?.task || body.event; if (task) pushTask(task); }
+  res.json({ code: 0 });
 });
 
 // ── Tasks ──
