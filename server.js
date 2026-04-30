@@ -1,200 +1,484 @@
-const fetch = require('node-fetch');
 const express = require('express');
 const cors = require('cors');
+require('dotenv').config();
+
+const { pool, initDB } = require('./db');
+const {
+  createFeishuTask,
+  completeFeishuTask,
+  uncompleteFeishuTask,
+  deleteFeishuTask,
+  updateFeishuTask,
+  fetchFeishuTasklists,
+  fetchFeishuTasks,
+  fetchTasklistsWithUserToken,
+  fetchTasksWithUserToken,
+} = require('./feishu');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const store = {
-  tasks: {}, expenses: {}, shopItems: {}, tasklists: {}, calendarEvents: {},
-  users: { 'user_001': { id: 'user_001', name: 'Player', gold: 500, today_gold: 0, streak_days: 0, max_streak: 0 } }
-};
+// OAuth user_access_token cache
+let userAccessTokenCache = { token: null, expireAt: 0 };
+const FEISHU_APP_ID = process.env.FEISHU_APP_ID;
+const FEISHU_APP_SECRET = process.env.FEISHU_APP_SECRET;
+const FEISHU_REDIRECT_URI = process.env.FEISHU_REDIRECT_URI || 'https://sparki-backend-osgd.onrender.com/api/feishu/oauth/callback';
 
-const oauthState = new Map();
-let userAccessToken = null;
-let userRefreshToken = null;
+// Health Check
+app.get('/', (req, res) => {
+  res.json({ ok: true, service: 'sparki-backend', version: '2.1.0' });
+});
 
-const FEISHU_API_BASE = 'https://open.feishu.cn/open-apis';
-
-async function getTenantToken() {
+// GET /api/user
+app.get('/api/user', async (req, res) => {
   try {
-    const res = await fetch(`${FEISHU_API_BASE}/auth/v3/tenant_access_token/internal`, {
+    const { rows } = await pool.query('SELECT * FROM users WHERE id = $1', ['user_001']);
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    const user = rows[0];
+    res.json({
+      id: user.id,
+      open_id: user.open_id,
+      name: user.name,
+      gold: user.gold,
+      streak_days: user.streak_days,
+      max_streak: user.max_streak,
+      today_gold: user.today_gold,
+      last_checkin_date: user.last_checkin_date,
+      feishu_connected: !!(user.feishu_app_id && user.feishu_app_secret),
+    });
+  } catch (err) {
+    console.error('GET /api/user error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/user/update-gold
+app.post('/api/user/update-gold', async (req, res) => {
+  const { gold_delta } = req.body;
+  if (typeof gold_delta !== 'number') {
+    return res.status(400).json({ error: 'gold_delta must be a number' });
+  }
+  try {
+    await pool.query('UPDATE users SET gold = gold + $1, updated_at = NOW() WHERE id = $2', [gold_delta, 'user_001']);
+    const { rows } = await pool.query('SELECT gold FROM users WHERE id = $1', ['user_001']);
+    res.json({ gold: rows[0].gold });
+  } catch (err) {
+    console.error('POST /api/user/update-gold error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/user/feishu-config
+app.post('/api/user/feishu-config', async (req, res) => {
+  const { app_id, app_secret } = req.body;
+  try {
+    await pool.query('UPDATE users SET feishu_app_id = $1, feishu_app_secret = $2, updated_at = NOW() WHERE id = $3', [app_id, app_secret, 'user_001']);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/tasks
+app.get('/api/tasks', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM tasks WHERE user_id = $1 ORDER BY created_at DESC', ['user_001']);
+    res.json({ tasks: rows });
+  } catch (err) {
+    console.error('GET /api/tasks error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/tasks
+app.post('/api/tasks', async (req, res) => {
+  const { title, description, due_date, gold_reward = 5, difficulty = 'low', tasklist_id } = req.body;
+  const id = 'sparki_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+  try {
+    await pool.query(
+      'INSERT INTO tasks (id, title, description, due_date, gold_reward, difficulty, feishu_tasklist_guid, user_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+      [id, title, description || '', due_date || null, gold_reward, difficulty, tasklist_id || null, 'user_001']
+    );
+    const db = { pool };
+    const feishuResult = await createFeishuTask(db, title, description, due_date);
+    if (feishuResult) {
+      await pool.query('UPDATE tasks SET source = $1, feishu_guid = $2 WHERE id = $3', ['feishu', feishuResult.feishuGuid, id]);
+    }
+    res.json({ id, title, status: 'todo', gold_reward, feishu_synced: !!feishuResult });
+  } catch (err) {
+    console.error('POST /api/tasks error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/tasks/:id
+app.patch('/api/tasks/:id', async (req, res) => {
+  const { id } = req.params;
+  const { status, title, description, due_date } = req.body;
+  try {
+    const { rows } = await pool.query('SELECT * FROM tasks WHERE id = $1', [id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Task not found' });
+    const task = rows[0];
+
+    const updates = [];
+    const values = [];
+    let idx = 1;
+
+    if (status !== undefined) {
+      updates.push('status = $' + idx++);
+      values.push(status);
+      if (status === 'done') {
+        updates.push('completed_at = $' + idx++);
+        values.push(new Date().toISOString());
+      } else {
+        updates.push('completed_at = NULL');
+      }
+    }
+    if (title !== undefined) { updates.push('title = $' + idx++); values.push(title); }
+    if (description !== undefined) { updates.push('description = $' + idx++); values.push(description); }
+    if (due_date !== undefined) { updates.push('due_date = $' + idx++); values.push(due_date); }
+    updates.push('updated_at = NOW()');
+    values.push(id);
+
+    await pool.query('UPDATE tasks SET ' + updates.join(', ') + ' WHERE id = $' + idx, values);
+
+    if (task.source === 'feishu' && task.feishu_guid) {
+      const db = { pool };
+      if (status === 'done') await completeFeishuTask(db, task.feishu_guid);
+      else if (status === 'todo') await uncompleteFeishuTask(db, task.feishu_guid);
+      if (title !== undefined || description !== undefined) {
+        await updateFeishuTask(db, task.feishu_guid, { title, description });
+      }
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('PATCH /api/tasks/:id error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/tasks/:id
+app.delete('/api/tasks/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { rows } = await pool.query('SELECT * FROM tasks WHERE id = $1', [id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Task not found' });
+    const task = rows[0];
+    if (task.source === 'feishu' && task.feishu_guid) {
+      const db = { pool };
+      await deleteFeishuTask(db, task.feishu_guid);
+    }
+    await pool.query('DELETE FROM tasks WHERE id = $1', [id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('DELETE /api/tasks/:id error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/tasklists
+app.get('/api/tasklists', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM tasklists WHERE user_id = $1 ORDER BY created_at ASC', ['user_001']);
+    res.json({ tasklists: rows });
+  } catch (err) {
+    console.error('GET /api/tasklists error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/tasklists
+app.post('/api/tasklists', async (req, res) => {
+  const { name } = req.body;
+  const id = 'list_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
+  try {
+    await pool.query('INSERT INTO tasklists (id, name, user_id) VALUES ($1, $2, $3)', [id, name, 'user_001']);
+    res.json({ id, name });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/expenses
+app.get('/api/expenses', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM expenses WHERE user_id = $1 ORDER BY created_at DESC', ['user_001']);
+    res.json({ expenses: rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/expenses
+app.post('/api/expenses', async (req, res) => {
+  const { description, amount, type, category, date } = req.body;
+  const id = 'exp_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
+  try {
+    await pool.query(
+      'INSERT INTO expenses (id, description, amount, type, category, date, user_id) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+      [id, description, amount, type, category, date, 'user_001']
+    );
+    res.json({ id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/shopitems
+app.get('/api/shopitems', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM shop_items WHERE user_id = $1 ORDER BY cost ASC', ['user_001']);
+    res.json({ items: rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/shopitems/:id/purchase
+app.post('/api/shopitems/:id/purchase', async (req, res) => {
+  const { id } = req.params;
+  try {
+    await pool.query('UPDATE shop_items SET purchased = true, purchased_at = NOW() WHERE id = $1', [id]);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/webhook/feishu
+app.post('/api/webhook/feishu', async (req, res) => {
+  const body = req.body;
+  if (body.challenge) {
+    return res.json({ challenge: body.challenge });
+  }
+  const event = body.event;
+  const eventType = body.header ? body.header.event_type : (event ? event.type : null);
+  if (eventType && event) {
+    try {
+      await pool.query('INSERT INTO feishu_events (event_type, event_data) VALUES ($1, $2)', [eventType, JSON.stringify(body)]);
+      await processFeishuEvent(eventType, event);
+    } catch (err) {
+      console.error('Webhook processing error:', err);
+    }
+  }
+  res.json({ ok: true });
+});
+
+async function processFeishuEvent(eventType, event) {
+  console.log('Processing Feishu event:', eventType);
+  switch (eventType) {
+    case 'task.task.created':
+    case 'task.created': {
+      const task = event.task;
+      if (!task) return;
+      const { rows } = await pool.query('SELECT id FROM tasks WHERE feishu_guid = $1', [task.guid]);
+      if (rows.length > 0) return;
+      const id = 'feishu_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
+      await pool.query(
+        'INSERT INTO tasks (id, title, description, status, source, feishu_guid, feishu_tasklist_guid, user_id, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())',
+        [id, task.summary || '未命名任务', task.description || '', 'todo', 'feishu', task.guid, task.tasklist ? task.tasklist.guid : null, 'user_001']
+      );
+      console.log('Feishu task imported:', task.summary);
+      break;
+    }
+    case 'task.task.completed':
+    case 'task.completed': {
+      const task = event.task;
+      if (!task || !task.guid) return;
+      await pool.query("UPDATE tasks SET status = 'done', completed_at = NOW(), updated_at = NOW() WHERE feishu_guid = $1", [task.guid]);
+      console.log('Feishu task completed:', task.guid);
+      break;
+    }
+    case 'task.task.updated':
+    case 'task.updated': {
+      const task = event.task;
+      if (!task || !task.guid) return;
+      await pool.query('UPDATE tasks SET title = $1, description = $2, updated_at = NOW() WHERE feishu_guid = $3', [task.summary, task.description || '', task.guid]);
+      break;
+    }
+    case 'task.task.deleted':
+    case 'task.deleted': {
+      const guid = event.task ? (event.task.guid || event.task_guid) : null;
+      if (!guid) return;
+      await pool.query('DELETE FROM tasks WHERE feishu_guid = $1', [guid]);
+      console.log('Feishu task deleted:', guid);
+      break;
+    }
+  }
+}
+
+// ============================================
+// FEISHU OAUTH 2.0
+// ============================================
+
+// Step 1: Get OAuth URL
+app.get('/api/feishu/oauth/url', (req, res) => {
+  if (!FEISHU_APP_ID) {
+    return res.status(500).json({ error: 'FEISHU_APP_ID not configured' });
+  }
+  const redirectUri = encodeURIComponent(FEISHU_REDIRECT_URI);
+  const scope = 'task:tasklist:read%20task:task:read';
+  const state = 'sparki_' + Date.now();
+  const url = 'https://open.feishu.cn/open-apis/authen/v1/index?redirect_uri=' + redirectUri + '&app_id=' + FEISHU_APP_ID + '&scope=' + scope + '&state=' + state;
+  console.log('[OAuth] URL generated');
+  res.json({ url });
+});
+
+// Step 2: OAuth Callback
+app.get('/api/feishu/oauth/callback', async (req, res) => {
+  const code = req.query.code;
+  if (!code) {
+    return res.status(400).json({ error: 'Missing authorization code' });
+  }
+  console.log('[OAuth] Callback received, code:', code.toString().slice(0, 10) + '...');
+  try {
+    const tokenRes = await fetch('https://open.feishu.cn/open-apis/authen/v1/oidc/access_token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ app_id: process.env.FEISHU_APP_ID || '', app_secret: process.env.FEISHU_APP_SECRET || '' })
+      body: JSON.stringify({
+        grant_type: 'authorization_code',
+        code: code,
+        app_id: FEISHU_APP_ID,
+        app_secret: FEISHU_APP_SECRET,
+      }),
     });
-    const data = await res.json();
-    if (data.code === 0) return data.tenant_access_token;
-    return null;
-  } catch (err) { return null; }
-}
+    const tokenData = await tokenRes.json();
+    console.log('[OAuth] Token exchange code:', tokenData.code);
 
-async function exchangeCodeForToken(code) {
-  const tenantToken = await getTenantToken();
-  if (!tenantToken) return null;
-  try {
-    const res = await fetch(`${FEISHU_API_BASE}/authen/v1/access_token`, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${tenantToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ grant_type: 'authorization_code', code })
-    });
-    const data = await res.json();
-    if (data.code === 0 && data.data) {
-      return { access_token: data.data.access_token, refresh_token: data.data.refresh_token, expire: data.data.expires_in || 7200 };
+    if (tokenData.code !== 0 || !tokenData.data || !tokenData.data.access_token) {
+      console.error('[OAuth] Token exchange failed:', JSON.stringify(tokenData));
+      return res.redirect('https://aqjsoa7d7jhfm.ok.kimi.link/?oauth=error&message=' + encodeURIComponent(tokenData.msg || 'Token exchange failed'));
     }
-    return null;
-  } catch (err) { return null; }
-}
 
-async function getUserToken() {
-  if (!userAccessToken) return null;
-  if (Date.now() < userAccessToken.expireAt - 60000) return userAccessToken.token;
-  if (!userRefreshToken) return null;
-  const tenantToken = await getTenantToken();
-  if (!tenantToken) return null;
-  try {
-    const res = await fetch(`${FEISHU_API_BASE}/authen/v1/refresh_access_token`, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${tenantToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ grant_type: 'refresh_token', refresh_token: userRefreshToken })
+    const userToken = tokenData.data.access_token;
+    const expireIn = tokenData.data.expire || 7200;
+    userAccessTokenCache = { token: userToken, expireAt: Date.now() + expireIn * 1000 };
+    console.log('[OAuth] User token obtained, expires in', expireIn, 's');
+
+    const userRes = await fetch('https://open.feishu.cn/open-apis/authen/v1/user_info', {
+      headers: { Authorization: 'Bearer ' + userToken },
     });
-    const data = await res.json();
-    if (data.code === 0 && data.data) {
-      userAccessToken = { token: data.data.access_token, expireAt: Date.now() + (data.data.expires_in || 7200) * 1000 };
-      userRefreshToken = data.data.refresh_token;
-      return userAccessToken.token;
+    const userData = await userRes.json();
+    if (userData.code === 0 && userData.data) {
+      console.log('[OAuth] User:', userData.data.name);
     }
-    return null;
-  } catch (err) { return null; }
-}
 
-async function fetchTasklistsUser(token) {
-  try {
-    const res = await fetch(`${FEISHU_API_BASE}/task/v2/tasklists`, {
-      method: 'GET',
-      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
-    });
-    const data = await res.json();
-    if (data.code === 0 && data.data?.items) return data.data.items.map(item => ({ guid: item.guid, name: item.name || '未命名' }));
-    if (data.code === 0 && (!data.data || !data.data.items)) return [];
-    return null;
-  } catch (err) { return null; }
-}
-
-async function fetchTasksUser(token, tasklistGuid) {
-  try {
-    const res = await fetch(`${FEISHU_API_BASE}/task/v2/tasklists/${tasklistGuid}/tasks?page_size=500`, {
-      method: 'GET',
-      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
-    });
-    const data = await res.json();
-    if (data.code === 0 && data.data?.items) {
-      return data.data.items.map(item => ({
-        id: item.task?.guid || item.guid || `sparki_${Date.now()}_${Math.random()}`,
-        title: item.task?.summary || '未命名任务',
-        description: item.task?.description || '',
-        status: item.task?.completed ? 'done' : 'todo',
-        due_date: item.task?.due?.timestamp ? new Date(parseInt(item.task.due.timestamp)).toISOString().split('T')[0] : null,
-        completed_at: item.task?.completed ? new Date().toISOString() : null,
-        source: 'feishu',
-        feishu_guid: item.task?.guid || item.guid,
-        feishu_tasklist_guid: tasklistGuid,
-        user_id: 'user_001',
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      }));
-    }
-    if (data.code === 0 && (!data.data || !data.data.items)) return [];
-    return null;
-  } catch (err) { return null; }
-}
-
-function pushTasklist(list) {
-  const id = list.id || list.guid || `list_${Date.now()}`;
-  store.tasklists[id] = { id, name: list.name || '未命名清单', feishu_guid: list.guid || list.id, user_id: 'user_001', created_at: new Date().toISOString(), updated_at: new Date().toISOString(), ...list };
-  return store.tasklists[id];
-}
-
-function pushTask(task) {
-  const id = task.id || task.guid || `task_${Date.now()}_${Math.random()}`;
-  store.tasks[id] = { id, title: task.title || task.summary || '未命名任务', description: task.description || '', status: task.status || 'todo', source: 'feishu', feishu_guid: task.guid || task.id, feishu_tasklist_guid: task.tasklist_id || task.list_id || null, user_id: 'user_001', due_date: task.due_date || null, completed_at: task.completed_at || null, gold_reward: task.gold_reward || 5, created_at: task.created_at || new Date().toISOString(), updated_at: new Date().toISOString(), ...task };
-  return store.tasks[id];
-}
-
-function updateTask(id, updates) { if (!store.tasks[id]) return null; store.tasks[id] = { ...store.tasks[id], ...updates, updated_at: new Date().toISOString() }; return store.tasks[id]; }
-function deleteTask(id) { const t = store.tasks[id]; if (t) { delete store.tasks[id]; return t; } return null; }
-
-app.get('/health', (req, res) => res.json({ ok: true }));
-
-app.get('/', (req, res) => { res.json({ ok: true, service: 'sparki-backend', stats: { tasks: Object.keys(store.tasks).length, tasklists: Object.keys(store.tasklists).length, expenses: Object.keys(store.expenses).length, shopItems: Object.keys(store.shopItems).length } }); });
-
-app.get('/api/feishu/oauth/url', async (req, res) => {
-  const appId = process.env.FEISHU_APP_ID;
-  if (!appId) return res.status(500).json({ error: 'FEISHU_APP_ID not configured' });
-  const state = `st_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  oauthState.set(state, { createdAt: Date.now() });
-  const redirectUri = encodeURIComponent('https://sparki-backend-osgd.onrender.com/api/feishu/oauth/callback');
-  const scope = encodeURIComponent('task:task:read task:tasklist:read');
-  const url = `https://open.feishu.cn/open-apis/authen/v1/index?app_id=${appId}&redirect_uri=${redirectUri}&scope=${scope}&state=${state}`;
-  res.json({ url, state });
+    res.redirect('https://aqjsoa7d7jhfm.ok.kimi.link/?oauth=success');
+  } catch (err) {
+    console.error('[OAuth] Callback error:', err);
+    res.redirect('https://aqjsoa7d7jhfm.ok.kimi.link/?oauth=error&message=' + encodeURIComponent(err.message));
+  }
 });
 
-app.get('/api/feishu/oauth/callback', async (req, res) => {
-  const { code, state } = req.query;
-  if (!code || !state) return res.status(400).send('<h1>授权失败</h1><p>缺少参数</p>');
-  if (!oauthState.has(state)) return res.status(400).send('<h1>授权失败</h1><p>state已过期</p>');
-  oauthState.delete(state);
-  const tokenInfo = await exchangeCodeForToken(code);
-  if (!tokenInfo) return res.status(500).send('<h1>授权失败</h1><p>无法换取token</p>');
-  userAccessToken = { token: tokenInfo.access_token, expireAt: Date.now() + tokenInfo.expire * 1000 };
-  userRefreshToken = tokenInfo.refresh_token;
-  res.redirect('https://aqjsoa7d7jhfm.ok.kimi.link/?oauth=success');
-});
-
+// Step 3: Check OAuth status
 app.get('/api/feishu/oauth/status', (req, res) => {
-  const hasToken = !!userAccessToken && Date.now() < userAccessToken.expireAt - 60000;
-  res.json({ authorized: hasToken, expiresIn: userAccessToken ? Math.floor((userAccessToken.expireAt - Date.now()) / 1000) : 0 });
+  const authorized = !!(userAccessTokenCache.token && Date.now() < userAccessTokenCache.expireAt);
+  const expiresIn = authorized ? Math.floor((userAccessTokenCache.expireAt - Date.now()) / 1000) : 0;
+  res.json({ authorized, expiresIn });
 });
+
+// ============================================
+// FEISHU MANUAL SYNC
+// ============================================
 
 app.post('/api/feishu/sync', async (req, res) => {
   try {
-    const token = await getUserToken();
-    if (!token) return res.status(401).json({ error: 'No user authorization', needAuth: true });
-    const lists = await fetchTasklistsUser(token);
-    if (lists === null) return res.status(500).json({ error: 'Failed to fetch tasklists' });
-    let totalTasks = 0; const imported = [];
-    for (const list of lists) {
-      store.tasklists[list.guid] = { id: list.guid, name: list.name, feishu_guid: list.guid, user_id: 'user_001', created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
-      const tasks = await fetchTasksUser(token, list.guid); if (!tasks) continue;
-      for (const t of tasks) { store.tasks[t.id] = t; totalTasks++; }
-      imported.push({ list: list.name, count: tasks.length });
+    console.log('[Sync] Starting...');
+    console.log('[Sync] User token available:', !!(userAccessTokenCache.token && Date.now() < userAccessTokenCache.expireAt));
+
+    let feishuLists = null;
+
+    if (userAccessTokenCache.token && Date.now() < userAccessTokenCache.expireAt) {
+      console.log('[Sync] Using user_access_token...');
+      feishuLists = await fetchTasklistsWithUserToken(userAccessTokenCache.token);
+      if (feishuLists) {
+        console.log('[Sync] Fetched ' + feishuLists.length + ' tasklists via user token');
+      } else {
+        console.log('[Sync] User token failed, trying tenant token...');
+      }
     }
-    res.json({ ok: true, tasklists: lists.length, tasks: totalTasks, detail: imported });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+
+    if (!feishuLists) {
+      console.log('[Sync] Using tenant_access_token...');
+      const db = { pool };
+      feishuLists = await fetchFeishuTasklists(db);
+      if (feishuLists) {
+        console.log('[Sync] Fetched ' + feishuLists.length + ' tasklists via tenant token');
+      }
+    }
+
+    if (!feishuLists) {
+      return res.status(500).json({
+        error: 'Failed to fetch Feishu tasklists. Both tokens failed. Try authorizing Feishu OAuth first.',
+      });
+    }
+
+    const savedLists = [];
+    for (const list of feishuLists) {
+      await pool.query(
+        'INSERT INTO tasklists (id, name, feishu_guid, user_id, updated_at) VALUES ($1, $2, $3, $4, NOW()) ON CONFLICT (id) DO UPDATE SET name = $2, feishu_guid = $3, updated_at = NOW()',
+        [list.guid, list.name, list.guid, 'user_001']
+      );
+      savedLists.push({ id: list.guid, name: list.name });
+    }
+
+    let totalTasks = 0;
+    const savedTasks = [];
+
+    for (const list of feishuLists) {
+      let tasks = null;
+      if (userAccessTokenCache.token && Date.now() < userAccessTokenCache.expireAt) {
+        tasks = await fetchTasksWithUserToken(userAccessTokenCache.token, list.guid);
+      }
+      if (!tasks) {
+        const db = { pool };
+        tasks = await fetchFeishuTasks(db, list.guid);
+      }
+      if (!tasks) {
+        console.log('[Sync] No tasks for list:', list.name);
+        continue;
+      }
+      console.log('[Sync] List "' + list.name + '":', tasks.length, 'tasks');
+
+      for (const task of tasks) {
+        const { rows: existing } = await pool.query('SELECT id FROM tasks WHERE feishu_guid = $1', [task.guid]);
+        if (existing.length > 0) {
+          await pool.query(
+            'UPDATE tasks SET title = $1, description = $2, status = $3, due_date = $4, completed_at = $5, feishu_tasklist_guid = $6, updated_at = NOW() WHERE feishu_guid = $7',
+            [task.title, task.description, task.status, task.due_date, task.completed_at, task.tasklist_guid, task.guid]
+          );
+        } else {
+          await pool.query(
+            'INSERT INTO tasks (id, title, description, status, source, feishu_guid, feishu_tasklist_guid, user_id, due_date, completed_at, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())',
+            [task.id, task.title, task.description, task.status, 'feishu', task.guid, task.tasklist_guid, 'user_001', task.due_date, task.completed_at]
+          );
+        }
+        totalTasks++;
+        savedTasks.push({ id: task.id, title: task.title, list: list.name, status: task.status });
+      }
+    }
+
+    res.json({ ok: true, tasklists: savedLists.length, tasks: totalTasks, detail: { lists: savedLists, tasks: savedTasks.slice(0, 20) } });
+  } catch (err) {
+    console.error('POST /api/feishu/sync error:', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.post('/api/webhook', (req, res) => {
-  if (req.body.challenge) return res.json({ challenge: req.body.challenge });
-  const eventType = req.body.header?.event_type || req.body.event?.type;
-  if (eventType?.includes('tasklist')) { const list = req.body.event?.tasklist || req.body.event; if (list) pushTasklist(list); }
-  else if (eventType?.includes('task')) { const task = req.body.event?.task || req.body.event; if (task) pushTask(task); }
-  res.json({ code: 0 });
+// ============================================
+// START SERVER
+// ============================================
+
+const PORT = process.env.PORT || 3000;
+
+initDB().then(() => {
+  app.listen(PORT, () => {
+    console.log('Sparki backend running on port ' + PORT);
+  });
+}).catch((err) => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
 });
-
-app.get('/api/tasks', (req, res) => { res.json({ tasks: Object.values(store.tasks).sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0)) }); });
-app.get('/api/tasklists', (req, res) => { res.json({ tasklists: Object.values(store.tasklists) }); });
-app.post('/api/tasks', (req, res) => { res.status(201).json(pushTask(req.body)); });
-app.patch('/api/tasks/:id', (req, res) => { const task = updateTask(req.params.id, req.body); if (!task) return res.status(404).json({ error: 'Not found' }); res.json(task); });
-app.delete('/api/tasks/:id', (req, res) => { if (!deleteTask(req.params.id)) return res.status(404).json({ error: 'Not found' }); res.json({ ok: true }); });
-app.get('/api/expenses', (req, res) => { res.json(Object.values(store.expenses).sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0))); });
-app.post('/api/expenses', (req, res) => { const id = `exp_${Date.now()}`; store.expenses[id] = { id, ...req.body, created_at: new Date().toISOString() }; res.status(201).json(store.expenses[id]); });
-app.get('/api/shopitems', (req, res) => { res.json(Object.values(store.shopItems)); });
-app.post('/api/shopitems', (req, res) => { const id = `shop_${Date.now()}`; store.shopItems[id] = { id, ...req.body, created_at: new Date().toISOString() }; res.status(201).json(store.shopItems[id]); });
-app.get('/api/calendar', (req, res) => { res.json({ events: Object.values(store.calendarEvents).sort((a, b) => new Date(b.startTime || 0) - new Date(a.startTime || 0)) }); });
-app.post('/api/calendar', (req, res) => { const id = `cal_${Date.now()}`; store.calendarEvents[id] = { id, ...req.body, created_at: new Date().toISOString() }; res.status(201).json(store.calendarEvents[id]); });
-app.get('/api/user', (req, res) => { const user = store.users['user_001']; if (!user) return res.status(404).json({ error: 'Not found' }); res.json(user); });
-app.post('/api/user/gold', (req, res) => { const { gold, today_gold } = req.body; const user = store.users['user_001']; if (user) { if (gold !== undefined) user.gold = gold; if (today_gold !== undefined) user.today_gold = today_gold; user.updated_at = new Date().toISOString(); } res.json(user); });
-
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => { console.log(`Sparki backend on port ${PORT}`); });
