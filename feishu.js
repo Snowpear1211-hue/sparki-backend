@@ -184,8 +184,7 @@ async function fetchFeishuTasks(db, tasklistGuid) {
   }
 }
 
-// ======== USER TOKEN VERSIONS (with error details) ========
-
+// USER TOKEN VERSIONS with error caching
 let lastTasklistsError = null;
 let lastTasksError = null;
 
@@ -198,11 +197,9 @@ async function fetchTasklistsWithUserToken(userToken) {
     });
     const data = await res.json();
     console.log('[UserToken] tasklists code:', data.code, 'msg:', data.msg);
-
     if (data.code === 0 && data.data && data.data.items) {
       return data.data.items.map((item) => ({ guid: item.guid, name: item.name || '未命名清单' }));
     }
-
     lastTasklistsError = { api: 'v2/tasklists', code: data.code, msg: data.msg };
     if (data.code !== 0) {
       console.log('[UserToken] v2 failed, trying v1...');
@@ -234,7 +231,6 @@ async function fetchTasksWithUserToken(userToken, tasklistGuid) {
       headers: { Authorization: 'Bearer ' + userToken, 'Content-Type': 'application/json' },
     });
     const data = await res.json();
-
     if (data.code === 0 && data.data && data.data.items) {
       return data.data.items.map((item) => ({
         id: item.task ? (item.task.id || item.guid || 'sparki_' + Date.now()) : (item.guid || 'sparki_' + Date.now()),
@@ -247,7 +243,6 @@ async function fetchTasksWithUserToken(userToken, tasklistGuid) {
         tasklist_guid: tasklistGuid,
       }));
     }
-
     lastTasksError = { api: 'v2', code: data.code, msg: data.msg };
     if (data.code !== 0) {
       console.log('[UserToken] v2 tasks failed, trying v1...');
@@ -264,7 +259,7 @@ async function fetchTasksWithUserToken(userToken, tasklistGuid) {
           title: item.task ? (item.task.summary || '未命名任务') : '未命名任务',
           description: item.task ? (item.task.description || '') : '',
           status: item.task && item.task.completed ? 'done' : 'todo',
-          due_date: item.task && item.task.due && item.task.due.timestamp ? new Date(parseInt(item.task.due.timestamp)).toISOString().split('T')[0] : null,
+          due_date: item.task && item.task.due && dataV1.task.due && dataV1.task.due.timestamp ? new Date(parseInt(dataV1.task.due.timestamp)).toISOString().split('T')[0] : null,
           completed_at: item.task && item.task.completed ? new Date().toISOString() : null,
           tasklist_guid: tasklistGuid,
         }));
