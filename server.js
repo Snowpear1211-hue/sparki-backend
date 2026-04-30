@@ -63,7 +63,7 @@ app.post('/api/user/update-gold', async (req, res) => {
   }
   try {
     await pool.query('UPDATE users SET gold = gold + $1, updated_at = NOW() WHERE id = $2', [gold_delta, 'user_001']);
-    const { rows } = await pool.query('SELECT gold FROM users WHERE id = $1', ['user_001']);
+n    const { rows } = await pool.query('SELECT gold FROM users WHERE id = $1', ['user_001']);
     res.json({ gold: rows[0].gold });
   } catch (err) {
     console.error('POST /api/user/update-gold error:', err);
@@ -381,40 +381,71 @@ app.get('/api/feishu/oauth/status', (req, res) => {
 });
 
 // ============================================
-// FEISHU MANUAL SYNC
+// FEISHU MANUAL SYNC (with detailed debug)
 // ============================================
 
 app.post('/api/feishu/sync', async (req, res) => {
   try {
-    console.log('[Sync] Starting...');
-    console.log('[Sync] User token available:', !!(userAccessTokenCache.token && Date.now() < userAccessTokenCache.expireAt));
+    const debug = {
+      steps: [],
+      tokenStatus: { hasToken: false, expired: true },
+      tasklistAttempt: null,
+      tasklistError: null,
+      tasklistsFetched: null,
+    };
+
+    debug.tokenStatus.hasToken = !!userAccessTokenCache.token;
+    debug.tokenStatus.expired = Date.now() >= userAccessTokenCache.expireAt;
+    debug.tokenStatus.hasValidToken = !!(userAccessTokenCache.token && Date.now() < userAccessTokenCache.expireAt);
+    debug.steps.push('Token status checked: hasValid=' + debug.tokenStatus.hasValidToken);
 
     let feishuLists = null;
 
     if (userAccessTokenCache.token && Date.now() < userAccessTokenCache.expireAt) {
-      console.log('[Sync] Using user_access_token...');
-      feishuLists = await fetchTasklistsWithUserToken(userAccessTokenCache.token);
-      if (feishuLists) {
-        console.log('[Sync] Fetched ' + feishuLists.length + ' tasklists via user token');
-      } else {
-        console.log('[Sync] User token failed, trying tenant token...');
+      debug.steps.push('Trying user_access_token...');
+      try {
+        feishuLists = await fetchTasklistsWithUserToken(userAccessTokenCache.token);
+        debug.tasklistAttempt = 'user_token';
+        if (feishuLists) {
+          debug.steps.push('User token success: ' + feishuLists.length + ' lists');
+        } else {
+          debug.steps.push('User token returned null (API error)');
+        }
+      } catch (e) {
+        debug.steps.push('User token threw: ' + e.message);
+        debug.tasklistError = e.message;
+      }
+    } else {
+      debug.steps.push('Skipping user token (missing or expired)');
+    }
+
+    if (!feishuLists) {
+      debug.steps.push('Trying tenant_access_token...');
+      debug.tasklistAttempt = 'tenant_token';
+      try {
+        const db = { pool };
+        feishuLists = await fetchFeishuTasklists(db);
+        if (feishuLists) {
+          debug.steps.push('Tenant token success: ' + feishuLists.length + ' lists');
+        } else {
+          debug.steps.push('Tenant token returned null (API error)');
+        }
+      } catch (e) {
+        debug.steps.push('Tenant token threw: ' + e.message);
+        debug.tasklistError = (debug.tasklistError ? debug.tasklistError + '; ' : '') + e.message;
       }
     }
 
     if (!feishuLists) {
-      console.log('[Sync] Using tenant_access_token...');
-      const db = { pool };
-      feishuLists = await fetchFeishuTasklists(db);
-      if (feishuLists) {
-        console.log('[Sync] Fetched ' + feishuLists.length + ' tasklists via tenant token');
-      }
-    }
-
-    if (!feishuLists) {
+      debug.steps.push('Both tokens failed');
       return res.status(500).json({
-        error: 'Failed to fetch Feishu tasklists. Both tokens failed. Try authorizing Feishu OAuth first.',
+        error: 'Failed to fetch tasklists',
+        debug: debug,
       });
     }
+
+    debug.tasklistsFetched = feishuLists.map(l => ({ guid: l.guid, name: l.name }));
+    debug.steps.push('Saving ' + feishuLists.length + ' tasklists to DB...');
 
     const savedLists = [];
     for (const list of feishuLists) {
@@ -427,6 +458,7 @@ app.post('/api/feishu/sync', async (req, res) => {
 
     let totalTasks = 0;
     const savedTasks = [];
+    debug.steps.push('Fetching tasks from ' + feishuLists.length + ' lists...');
 
     for (const list of feishuLists) {
       let tasks = null;
@@ -438,10 +470,10 @@ app.post('/api/feishu/sync', async (req, res) => {
         tasks = await fetchFeishuTasks(db, list.guid);
       }
       if (!tasks) {
-        console.log('[Sync] No tasks for list:', list.name);
+        debug.steps.push('No tasks for list: ' + list.name);
         continue;
       }
-      console.log('[Sync] List "' + list.name + '":', tasks.length, 'tasks');
+      debug.steps.push('List "' + list.name + '": ' + tasks.length + ' tasks');
 
       for (const task of tasks) {
         const { rows: existing } = await pool.query('SELECT id FROM tasks WHERE feishu_guid = $1', [task.guid]);
@@ -461,10 +493,11 @@ app.post('/api/feishu/sync', async (req, res) => {
       }
     }
 
-    res.json({ ok: true, tasklists: savedLists.length, tasks: totalTasks, detail: { lists: savedLists, tasks: savedTasks.slice(0, 20) } });
+    debug.steps.push('Done. ' + savedLists.length + ' lists, ' + totalTasks + ' tasks');
+    res.json({ ok: true, tasklists: savedLists.length, tasks: totalTasks, detail: { lists: savedLists, tasks: savedTasks.slice(0, 20) }, debug: debug });
   } catch (err) {
     console.error('POST /api/feishu/sync error:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: err.message, stack: err.stack });
   }
 });
 
